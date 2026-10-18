@@ -49,6 +49,9 @@ header#top nav { display: flex; gap: 4px; }
 header#top nav a { text-decoration: none; color: var(--muted); padding: 6px 10px; font-family: var(--mono); font-size: 12.5px; letter-spacing: 0.08em; text-transform: uppercase; }
 header#top nav a:hover { color: var(--text); }
 header#top nav a.on { color: var(--text); background: var(--raised); }
+header#top nav .dev-link { display: flex; align-items: center; justify-content: center; gap: 6px; min-width: 32px; }
+header#top nav .dev-link svg { display: block; width: 14px; height: 14px; flex: none; }
+header#top nav .dev-link:focus-visible { outline: 1px solid var(--green-text); outline-offset: -2px; }
 .stats { display: flex; gap: 28px; flex: 1; justify-content: flex-end; overflow: hidden; }
 .stats div { display: flex; flex-direction: column; white-space: nowrap; line-height: 1.25; }
 label { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }

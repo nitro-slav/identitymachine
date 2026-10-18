@@ -27,7 +27,8 @@ export function shell(active: (typeof PAGES)[number][1] | "Parts") {
   const top = document.getElementById("top")!;
   const q = location.search; // keep ?net= across pages
   top.innerHTML = `<a class="brand" href="./index.html${q}" aria-label="Identity Machine"><img class="mark" src="./brand/mark.svg" alt=""><span>Identity Machine</span></a>
-    <nav aria-label="Site pages">${PAGES.map(([href, name]) => `<a href="./${href}${q}"${name === active ? ' class="on" aria-current="page"' : ""}>${name}</a>`).join("")}</nav>
+    <nav aria-label="Site pages">${PAGES.map(([href, name]) => `<a href="./${href}${q}"${name === active ? ' class="on" aria-current="page"' : ""}>${name}</a>`).join("")}
+      <a class="dev-link" href="https://x.com/nitroslaveth" target="_blank" rel="noopener noreferrer" aria-label="Developer and updates on X: @nitroslaveth (opens in a new tab)" title="Developer and updates: @nitroslaveth on X"><span>dev</span><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M18.244 2.25h3.308l-7.227 8.26L22.827 21.75H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a></nav>
     <div class="stats" id="stats"></div>
     <div class="wallet" id="wallet"><button class="btn outline" disabled>Connect</button></div>`;
 }
