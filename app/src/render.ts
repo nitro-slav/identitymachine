@@ -1,7 +1,7 @@
 import { ScreenCurve } from "./crt";
 import { type Jackpot } from "./jackpot";
 import { Board, footprint, key, DIRS, jackAt } from "./geometry";
-import { Wiring, SPEED, PULSE_LIFETIME, pulsePower, arcPoints, pointAt, arcDist, type Arrival } from "./signals";
+import { Wiring, SPEED, PULSE_LIFETIME, arcPoints, pointAt, arcDist, type Arrival } from "./signals";
 import { PARTS, CORE, UNIT, SEG, DIGIT, type Layer, type Anim } from "./parts.gen";
 
 // CPU-friendly: every layer of every part is rasterized once per zoom level from its SVG (art/parts.mjs).
@@ -114,7 +114,13 @@ function bboxOf(fp: number[][]): [number, number, number, number] {
   return [x0, y0, x1 - x0 + 1, y1 - y0 + 1];
 }
 
-interface Pulse { t: number; arr: Map<number, Arrival> }
+/** a signal running through the wiring: its age, when it reaches each part, how long it lasts, its colours */
+interface Pulse { t: number; arr: Map<number, Arrival>; life: number; rgb: readonly [string, string, string]; width: number }
+const GREEN = ["57,211,83", "176,237,186", "200,255,210"] as const;
+const GOLD = ["255,201,60", "255,226,140", "255,242,205"] as const; // legendary gold: the prize going out
+const power = (p: Pulse) => Math.max(0, 1 - p.t / p.life) ** 2;
+/** the round's end, in seconds: the celebration, the prize places lighting up, the machine taken apart outside in */
+const OUTRO = { gold: 1.2, take: 3.4, takeFor: 3.0, die: 0.55, after: 0.5 };
 
 export class Renderer {
   jackpot: Jackpot | null = null;
@@ -143,12 +149,13 @@ export class Renderer {
   private clocks = new Map<number, number>(); // each part's own animation time (it runs faster when energized)
   private alarm = 0;
   private wiring: Wiring;
-  // zoomed-out tiles: which parts touch each tile, and each tile's bitmap at the current scale
+  // zoomed-out tiles: which parts touch each tile, and each tile's last bitmap: the scale it was made at, how many of
+  // the tile's parts it holds, and whether a neighbour's change (lit jacks) has made it out of date. An old bitmap
+  // stays on screen until its replacement is ready, so zooming and new parts never leave empty squares.
   private tileParts = new Map<string, number[]>();
   private tileIndexed = new Set<number>();
   private tileEpoch = -1;
-  private tileBitmaps = new Map<string, HTMLCanvasElement>();
-  private tileScale = 0;
+  private tileBitmaps = new Map<string, { c: HTMLCanvasElement; scale: number; n: number; stale: boolean }>();
   /** live numbers shown by parts with a display */
   stats = { minted: 0, paid: 0 };
   private last = 0;
@@ -229,11 +236,11 @@ export class Renderer {
   }
 
   /** a signal from part `src` (0 = the core) through the wiring */
-  pulse(src = 0) {
+  pulse(src = 0, life = PULSE_LIFETIME, rgb: Pulse["rgb"] = GREEN, width = 1) {
     if (this.lowMotion) return;
-    const arr = this.wiring.arrivals(src);
-    this.pulses.push({ t: 0, arr });
-    if (this.pulses.length > 8) this.pulses.shift();
+    const arr = this.wiring.arrivals(src, life);
+    this.pulses.push({ t: 0, arr, life, rgb, width });
+    if (this.pulses.length > 16) this.pulses.shift();
   }
 
   placed(id: number) {
@@ -241,11 +248,91 @@ export class Renderer {
     this.fresh.set(id, 1);
   }
 
-  /** a legendary reveal: the whole machine flashes and three signals go out */
-  celebrate() {
-    if (this.lowMotion) return;
-    this.alarm = 1.8;
-    [0, 350, 700].forEach((ms) => setTimeout(() => this.pulse(0), ms));
+  // ---- the round's end, on the finished machine, before the next one opens
+  private out: { t: number; at: Map<number, number>; winners: number[]; fired: number; end: number; started: number; done: () => void } | null = null;
+  private boot = false;
+  private gone = -1; // the epoch of a machine whose outro has finished: drawn as the bare core until the next one opens
+  get outroActive() { return !!this.out; }
+
+  /**
+   * The clock ran out: the machine blinks and three signals go out from the core, then a gold wave from the core and
+   * gold signals from the ten prize places, then the parts come off from the outside in, faster and faster, each
+   * flashing and drifting outward as it goes, down to the core. Resolves when it is
+   * done (at once with reduced motion or an empty machine); the store opens the next machine after that.
+   */
+  outro(winners: number[]): Promise<void> {
+    if (this.lowMotion || this.board.placedCount === 0) return Promise.resolve();
+    return new Promise((done) => {
+      const placed = [...this.board.parts.values()].filter((p) => p.placed && this.board.fp.has(p.id));
+      const far = new Map(placed.map((p) => {
+        const [bx, by, bw, bh] = bboxOf(this.board.fp.get(p.id)!);
+        return [p.id, Math.hypot(bx + bw / 2 - 0.5, by + bh / 2 - 0.5) + Math.random() * 5];
+      }));
+      const order = placed.map((p) => p.id).sort((a, b) => far.get(b)! - far.get(a)!);
+      const at = new Map(order.map((id, i) => [id, OUTRO.take + OUTRO.takeFor * Math.sqrt(i / order.length)]));
+      const end = OUTRO.take + OUTRO.takeFor + OUTRO.die + OUTRO.after;
+      this.out = { t: 0, at, winners, fired: 0, end, started: performance.now(), done };
+      this.alarm = 1.8;
+      // the next machine must open even if frames stop (a hidden tab)
+      const watch = setInterval(() => {
+        if (this.out && performance.now() - this.out.started < end * 1000 + 4000) return;
+        clearInterval(watch);
+        this.endOutro();
+      }, 500);
+    });
+  }
+
+  private endOutro() {
+    const o = this.out;
+    if (!o) return;
+    this.out = null;
+    this.gone = this.board.epoch; // the store opens the next machine just after this frame: don't draw the old one again
+    this.boot = true; // the next machine's core lights up once
+    o.done();
+  }
+
+  /** the outro's clock: signals on cue, the end on time */
+  private stepOutro(dt: number) {
+    const o = this.out!;
+    o.t += dt;
+    const cues: [number, () => void][] = [
+      [0, () => this.pulse(0, 4.5, GREEN, 1.6)], [0.35, () => this.pulse(0, 4.5, GREEN, 1.6)], [0.7, () => this.pulse(0, 4.5, GREEN, 1.6)],
+      [OUTRO.gold, () => { this.pulse(0, 6, GOLD, 2.2); o.winners.forEach((id) => this.pulse(id, 3.5, GOLD, 2.2)); }],
+    ];
+    while (o.fired < cues.length && o.t >= cues[o.fired][0]) cues[o.fired++][1]();
+    if (o.t >= o.end) this.endOutro();
+  }
+
+  /** the finished machine, part by part: whole, then flashing as it comes off and drifting outward, turning,
+   *  shrinking and fading, gone */
+  private drawOutro(x0: number, y0: number, x1: number, y1: number) {
+    const o = this.out!, ctx = this.ctx, cs = this.cs;
+    this.drawLayers(ctx, "core", CORE, 3, 3, 0, ...this.project(-1, -1), cs, this.dpr, this.time);
+    for (const p of this.board.parts.values()) {
+      if (!p.placed || p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) continue;
+      const fp = this.board.fp.get(p.id), def = PARTS[p.design];
+      if (!fp || !def) continue;
+      const k = (o.t - (o.at.get(p.id) ?? Infinity)) / OUTRO.die;
+      if (k >= 1) continue;
+      if (k <= 0) {
+        if (this.detailed) this.part(p.id);
+        else { const [bx, by] = bboxOf(fp); this.drawLayers(ctx, String(def.id), def.layers, def.w, def.h, p.rot, ...this.project(bx, by), cs, this.dpr, 0); }
+        if (this.alarm > 0) this.marks(p.id);
+        continue;
+      }
+      const [bx, by, bw, bh] = bboxOf(fp), [sx, sy] = this.project(bx, by);
+      const mx = bx + bw / 2 - 0.5, my = by + bh / 2 - 0.5, n = Math.hypot(mx, my) || 1, drift = 2.5 * k ** 1.5 * cs;
+      const cx = sx + (bw * cs) / 2, cy = sy + (bh * cs) / 2, scale = 1 - 0.8 * k * k;
+      ctx.save();
+      ctx.globalAlpha = 1 - k * k * k;
+      ctx.translate(cx + (mx / n) * drift, cy + (my / n) * drift);
+      ctx.rotate(((p.id % 7) - 3) * 0.12 * k);
+      ctx.scale(scale, scale);
+      ctx.translate(-cx, -cy);
+      this.drawLayers(ctx, String(def.id), def.layers, def.w, def.h, p.rot, sx, sy, cs, this.dpr, 0);
+      ctx.restore();
+      if (k < 0.35) this.border(fp, `rgba(${GREEN[2]},${1 - k / 0.35})`, 1.6);
+    }
   }
 
   /** how strongly passing signals drive part `id` right now (0..1): it peaks as the light arrives */
@@ -256,7 +343,7 @@ export class Renderer {
       const a = p.arr.get(id);
       if (!a) continue;
       const dt = p.t - a.t;
-      if (dt >= 0 && dt < 0.9) e = Math.max(e, (1 - dt / 0.9) * pulsePower(p.t));
+      if (dt >= 0 && dt < 0.9) e = Math.max(e, (1 - dt / 0.9) * power(p));
     }
     return e;
   }
@@ -265,7 +352,8 @@ export class Renderer {
   private signals() {
     if (this.lowMotion || !this.pulses.length) return;
     const ctx = this.ctx, cs = this.cs;
-    const w = Math.max(1.3, (2.2 / UNIT) * cs);
+    const w0 = Math.max(1.3, (2.2 / UNIT) * cs);
+    let w = w0;
     const toS = (p: [number, number]) => this.project(p[0], p[1]);
     const stroke = (pts: [number, number][], color: string, width: number) => {
       ctx.strokeStyle = color;
@@ -279,7 +367,9 @@ export class Renderer {
     ctx.lineJoin = "round";
     ctx.globalCompositeOperation = "lighter";
     for (const p of this.pulses) {
-      ctx.globalAlpha = pulsePower(p.t);
+      ctx.globalAlpha = power(p);
+      const [c0, c1, c2] = p.rgb;
+      w = w0 * p.width;
       for (const [id, a] of p.arr) {
         const l = this.wiring.loops.get(id);
         if (!l) continue;
@@ -290,8 +380,8 @@ export class Renderer {
           const k = 1 - dt / 0.6;
           if (k > 0) {
             const all = arcPoints(l, 0, l.len);
-            stroke(all, `rgba(57,211,83,${0.35 * k})`, w * 3.2);
-            stroke(all, `rgba(176,237,186,${k})`, w);
+            stroke(all, `rgba(${c0},${0.35 * k})`, w * 3.2);
+            stroke(all, `rgba(${c1},${k})`, w);
           }
         } else {
           const d = dt * SPEED, half = l.len / 2;
@@ -300,11 +390,11 @@ export class Renderer {
               const front = Math.min(d, half), back = Math.max(0, d - TAIL);
               if (front <= back) continue;
               const seg = (u: number, v: number) => (dir > 0 ? arcPoints(l, a.s! + u, a.s! + v) : arcPoints(l, a.s! - v + l.len, a.s! - u + l.len));
-              stroke(seg(back, front), "rgba(57,211,83,0.22)", w * 3.2);
-              [0.18, 0.4, 0.75].forEach((alpha, i) => stroke(seg(back + ((front - back) * i) / 3, back + ((front - back) * (i + 1)) / 3), `rgba(57,211,83,${alpha})`, w));
+              stroke(seg(back, front), `rgba(${c0},0.22)`, w * 3.2);
+              [0.18, 0.4, 0.75].forEach((alpha, i) => stroke(seg(back + ((front - back) * i) / 3, back + ((front - back) * (i + 1)) / 3), `rgba(${c0},${alpha})`, w));
               if (d < half) {
                 const [hx, hy] = toS(pointAt(l, a.s! + dir * front));
-                ctx.fillStyle = "rgba(200,255,210,0.9)";
+                ctx.fillStyle = `rgba(${c2},0.9)`;
                 ctx.beginPath();
                 ctx.arc(hx, hy, w * 0.7, 0, Math.PI * 2);
                 ctx.fill();
@@ -319,11 +409,11 @@ export class Renderer {
           if (k <= 0 || k > 1) continue;
           const ux = port.at[0] - port.toAt[0], uy = port.at[1] - port.toAt[1], n = Math.hypot(ux, uy) || 1, j = 4 / UNIT;
           const ja: [number, number] = [port.at[0] + (ux / n) * j, port.at[1] + (uy / n) * j], jb: [number, number] = [port.toAt[0] - (ux / n) * j, port.toAt[1] - (uy / n) * j];
-          stroke([ja, jb], `rgba(57,211,83,${0.3 * k})`, w * 2.4);
-          stroke([ja, jb], `rgba(176,237,186,${0.85 * k})`, w * 0.6);
+          stroke([ja, jb], `rgba(${c0},${0.3 * k})`, w * 2.4);
+          stroke([ja, jb], `rgba(${c1},${0.85 * k})`, w * 0.6);
           for (const q of [ja, jb]) {
             const [x, y] = toS(q);
-            ctx.fillStyle = `rgba(57,211,83,${0.5 * k})`;
+            ctx.fillStyle = `rgba(${c0},${0.5 * k})`;
             ctx.beginPath();
             ctx.arc(x, y, (2 / UNIT) * cs * (1 + 0.5 * k), 0, Math.PI * 2);
             ctx.fill();
@@ -349,7 +439,9 @@ export class Renderer {
     this.snapshot = snapshot;
     if (!this.lowMotion) this.time += dt;
     for (const p of this.pulses) p.t += dt;
-    this.pulses = this.lowMotion ? [] : this.pulses.filter((p) => p.t < PULSE_LIFETIME);
+    this.pulses = this.lowMotion ? [] : this.pulses.filter((p) => p.t < p.life);
+    if (this.out) this.stepOutro(dt);
+    if (this.boot && !this.out && this.board.placedCount === 0) { this.boot = false; this.pulse(0); }
     this.alarm = Math.max(0, this.alarm - dt);
     if (this.lowMotion) { this.fresh.clear(); this.alarm = 0; }
     for (const [id, g] of this.fresh) g - dt * 0.6 <= 0 ? this.fresh.delete(id) : this.fresh.set(id, g - dt * 0.6);
@@ -365,7 +457,9 @@ export class Renderer {
     const [x1, y1] = this.unproject(r.width + this.cs * 3, r.height + this.cs * 3);
     if (this.detailed && this.cs < DETAIL_OUT) this.detailed = false;
     else if (!this.detailed && this.cs >= DETAIL_IN) this.detailed = true;
-    if (this.detailed) {
+    if (this.out) this.drawOutro(x0, y0, x1, y1);
+    else if (this.gone === this.board.epoch) this.drawLayers(ctx, "core", CORE, 3, 3, 0, ...this.project(-1, -1), this.cs, this.dpr, this.time);
+    else if (this.detailed) {
       // close up: every visible part, animated
       this.drawLayers(ctx, "core", CORE, 3, 3, 0, ...this.project(-1, -1), this.cs, this.dpr, this.time);
       for (const p of this.board.parts.values()) {
@@ -589,7 +683,7 @@ export class Renderer {
     ctx.restore();
   }
 
-  /** keep the tile index in step with the board; a newly placed part drops the tiles it touches */
+  /** keep the tile index in step with the board; a newly placed part marks the tiles it touches out of date */
   private indexTiles() {
     if (this.tileEpoch !== this.board.epoch) {
       // a new machine: drop everything cached for the old one
@@ -615,37 +709,61 @@ export class Renderer {
         }
       // the part, and the neighbours whose jacks it lights, may sit in any tile within a cell of it
       for (let tx = Math.floor((bx - 1) / TILE); tx <= Math.floor((bx + bw) / TILE); tx++)
-        for (let ty = Math.floor((by - 1) / TILE); ty <= Math.floor((by + bh) / TILE); ty++) this.tileBitmaps.delete(`${tx},${ty}`);
+        for (let ty = Math.floor((by - 1) / TILE); ty <= Math.floor((by + bh) / TILE); ty++) {
+          const t = this.tileBitmaps.get(`${tx},${ty}`);
+          if (t) t.stale = true;
+        }
     }
   }
 
-  /** draw the visible tiles, rendering missing ones (a few per frame) at a scale bucket of the zoom */
+  /**
+   * draw the visible tiles at a scale bucket of the zoom. A few are (re)rendered per frame, missing ones first; until
+   * then a tile shows its previous bitmap (stretched after a zoom), and parts that bitmap lacks are drawn one by one.
+   */
   private tiles(w: number, h: number) {
     this.indexTiles();
     const cs = this.cs;
     const scale = 2 ** (Math.round(Math.log2(cs * this.dpr) * 2) / 2); // device px per cell, in half-octave steps
-    if (scale !== this.tileScale) {
-      this.tileScale = scale;
-      this.tileBitmaps.clear();
-    }
     const [wx0, wy0] = this.unproject(0, 0), [wx1, wy1] = this.unproject(w, h);
-    let budget = TILE_RENDERS;
+    const visible: [string, number, number, number[]][] = [];
     for (let tx = Math.floor(wx0 / TILE); tx <= Math.floor(wx1 / TILE); tx++)
       for (let ty = Math.floor(wy0 / TILE); ty <= Math.floor(wy1 / TILE); ty++) {
         const k = `${tx},${ty}`;
         const ids = this.tileParts.get(k);
         if (!ids && !((tx === 0 || tx === -1) && (ty === 0 || ty === -1))) continue; // the core spans tiles -1 and 0
-        let bmp = this.tileBitmaps.get(k);
-        if (!bmp && budget-- > 0) bmp = this.renderTile(tx, ty, ids ?? [], scale) ?? undefined;
-        if (!bmp) { this.sprites.pending = true; continue; }
+        visible.push([k, tx, ty, ids ?? []]);
+      }
+    let budget = TILE_RENDERS;
+    for (const missing of [true, false])
+      for (const [k, tx, ty, ids] of visible) {
+        if (budget <= 0) break;
+        const t = this.tileBitmaps.get(k);
+        if (missing ? t : !t || (!t.stale && t.scale === scale && t.n === ids.length)) continue;
+        budget--;
+        this.renderTile(tx, ty, ids, scale);
+      }
+    const loose = new Set<number>();
+    for (const [k, tx, ty, ids] of visible) {
+      const t = this.tileBitmaps.get(k);
+      if (!t || t.stale || t.scale !== scale || t.n !== ids.length) this.sprites.pending = true;
+      if (t) {
         // snap to whole pixels and overlap by one, so no seams show between tiles
         const [sx, sy] = this.project(tx * TILE, ty * TILE), [ex, ey] = this.project((tx + 1) * TILE, (ty + 1) * TILE);
         const x = Math.floor(sx), y = Math.floor(sy);
-        this.ctx.drawImage(bmp, x, y, Math.ceil(ex) - x + 1, Math.ceil(ey) - y + 1);
-      }
+        this.ctx.drawImage(t.c, x, y, Math.ceil(ex) - x + 1, Math.ceil(ey) - y + 1);
+      } else if ((tx === 0 || tx === -1) && (ty === 0 || ty === -1)) loose.add(0);
+      for (let i = t?.n ?? 0; i < ids.length; i++) loose.add(ids[i]);
+    }
+    for (const id of loose) {
+      if (id === 0) { this.drawLayers(this.ctx, "core", CORE, 3, 3, 0, ...this.project(-1, -1), cs, this.dpr, 0); continue; }
+      const p = this.board.parts.get(id), def = p && PARTS[p.design], fp = this.board.fp.get(id);
+      if (!p || !def || !fp) continue;
+      const [bx, by] = bboxOf(fp);
+      this.drawLayers(this.ctx, String(def.id), def.layers, def.w, def.h, p.rot, ...this.project(bx, by), cs, this.dpr, 0);
+    }
   }
 
-  private renderTile(tx: number, ty: number, ids: number[], scale: number): HTMLCanvasElement | null {
+  private renderTile(tx: number, ty: number, ids: number[], scale: number) {
     const c = document.createElement("canvas");
     c.width = c.height = Math.ceil(TILE * scale);
     const g = c.getContext("2d")!;
@@ -667,8 +785,7 @@ export class Renderer {
         g.fill();
       }
     }
-    if (complete) this.tileBitmaps.set(`${tx},${ty}`, c);
-    return c;
+    if (complete) this.tileBitmaps.set(`${tx},${ty}`, { c, scale, n: ids.length, stale: false });
   }
 
   /** what changes on a placed part outside its art: the flash when paid or placed, your marks */

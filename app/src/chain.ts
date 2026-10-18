@@ -39,7 +39,7 @@ export const robinhood = defineChain({
   name: "Robinhood Chain",
   nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
   rpcUrls: { default: { http: ["https://rpc.mainnet.chain.robinhood.com"] } },
-  blockExplorers: { default: { name: "Blockscout", url: "https://robinhoodchain.blockscout.com" } },
+  blockExplorers: { default: { name: "RobinScan", url: "https://robin.etherscan.io" } },
 });
 export const anvil = defineChain({
   id: 31337,

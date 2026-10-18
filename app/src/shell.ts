@@ -125,7 +125,7 @@ function accountMenu(S: Store, anchor: HTMLElement) {
   const m = document.createElement("div");
   m.className = "menu";
   m.setAttribute("role", "menu");
-  const explorer = S.D.chainId === 4663 ? `<a role="menuitem" href="https://robinhoodchain.blockscout.com/address/${S.me}" target="_blank" rel="noopener">Explorer ↗</a>` : "";
+  const explorer = S.D.chainId === 4663 ? `<a role="menuitem" href="https://robin.etherscan.io/address/${S.me}" target="_blank" rel="noopener">Explorer ↗</a>` : "";
   m.innerHTML = `<div class="menu-head"><label></label><span class="mono"></span></div>
     <button role="menuitem" data-a="copy">Copy address</button>${explorer}
     <button role="menuitem" data-a="switch">Switch wallet</button>

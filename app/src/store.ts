@@ -394,8 +394,10 @@ export class Store {
         break;
       case "RoundEnded":
         if (Number(a.round) < B.round) return; // a retried event span must not reset an already-open machine
-        // listeners see the old machine's last state first (the prize places), then the new machine opens
+        // listeners see the old machine's last state first (the prize places), then the client's outro plays on it
+        // (later events wait in line), then the new machine opens
         for (const fn of this.listeners) fn(ev, live);
+        if (live && this.hold) await this.hold();
         this.ended.push({ round: Number(a.round), pot: a.pot, prize: a.prize, top: this.topTen() });
         B.reset(Number(a.round) + 1);
         this.order = [];
@@ -405,6 +407,9 @@ export class Store {
     }
     for (const fn of this.listeners) fn(ev, live);
   }
+
+  /** awaited after a live RoundEnded reaches the listeners, before the next machine opens */
+  hold: (() => Promise<void>) | null = null;
 
   /** machines that ended while the page was open: the round, its pot and prize, and its last ten parts */
   ended: { round: number; pot: bigint; prize: bigint; top: number[] }[] = [];
@@ -568,7 +573,7 @@ export class Store {
   }
 
   txLink(hash: Hex) {
-    return this.D.chainId === 4663 ? `https://robinhoodchain.blockscout.com/tx/${hash}` : "";
+    return this.D.chainId === 4663 ? `https://robin.etherscan.io/tx/${hash}` : "";
   }
 
   /** my inventory parts, and the parts I placed in the running machine */

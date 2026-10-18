@@ -177,7 +177,7 @@ S.init().then(() => {
   const D = S.D;
   const rows = [["Machine (buying, rounds, jackpot)", D.machine], ["Inventory", D.parts], ["Views", D.views],
     ...(D.ethMinter ? [["ETH checkout", D.ethMinter]] : []), ["drand beacon", D.beacon], ["IMD", D.imd]];
-  const link = (a: string) => (D.chainId === 4663 ? `<a href="https://robinhoodchain.blockscout.com/address/${a}" target="_blank" rel="noopener">${a}</a>` : a);
+  const link = (a: string) => (D.chainId === 4663 ? `<a href="https://robin.etherscan.io/address/${a}" target="_blank" rel="noopener">${a}</a>` : a);
   document.querySelector("#addrs tbody")!.innerHTML = rows.map(([n, a]) => `<tr><td>${n}</td><td class="mono">${link(a)}</td></tr>`).join("")
     + `<tr><td>Chain</td><td class="mono">${D.chainId === 4663 ? "Robinhood Chain (4663)" : `local test chain (${D.chainId})`}</td></tr>`;
 }).catch(() => {});

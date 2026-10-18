@@ -65,7 +65,7 @@ function pickPart(id: number | null) {
     tip.dataset.tier = TIER_CLASS[d.tier];
     const mine = same(p.owner, S.me), k = S.order.indexOf(id) + 1, place = S.topTen().indexOf(id);
     tip.innerHTML = `${close}<span class="tip-head"><b>${d.name}${p.seat !== undefined ? " #" + p.seat : ""}</b>${rarityTag(d.tier)}</span>
-      <a class="tip-owner${mine ? " mine" : ""}" ${S.D.chainId === 4663 ? `href="https://robinhoodchain.blockscout.com/address/${p.owner}" target="_blank" rel="noopener"` : `href="#" data-copy="${p.owner}"`}>${mine ? "Yours" : short(p.owner)} ↗</a>
+      <a class="tip-owner${mine ? " mine" : ""}" ${S.D.chainId === 4663 ? `href="https://robin.etherscan.io/address/${p.owner}" target="_blank" rel="noopener"` : `href="#" data-copy="${p.owner}"`}>${mine ? "Yours" : short(p.owner)} ↗</a>
       <dl>
         <dt>Earned</dt><dd class="tip-earned">…</dd>
         ${place >= 0 ? `<dt>Prize place</dt><dd class="tip-prize"></dd>` : ""}
@@ -343,9 +343,10 @@ S.on((ev) => {
     B.drafts.delete(Number(a.id)); // if it was my draft, it's real now
     lostDrafts += B.relay().length;
   }
-  if (ev.name === "RoundEnded") R.celebrate();
   render();
 });
+// the clock ran out: the finished machine celebrates and comes apart before the next one opens
+S.hold = () => R.outro(S.topTen());
 let lostDrafts = 0; // arranged parts whose spot someone else took, reported once per batch of events
 
 // ------------------------------------------------------------------ boot
@@ -629,7 +630,7 @@ function tick() {
     $("launch-clock").textContent = clock(opensIn);
     $("launch-when").textContent = new Date(Number(st.start) * 1000).toLocaleString(undefined, { weekday: "long", hour: "2-digit", minute: "2-digit" });
   }
-  $("end-round").hidden = before || Number(st.deadline) > chainNow();
+  $("end-round").hidden = before || Number(st.deadline) > chainNow() || R.outroActive;
   R.jackpot!.update({ round: Number(st.round), prize: st.pot * BigInt(WIN) / 10_000n,
     deadline: Number(st.deadline), start: Number(st.start), now: chainNow() }, motionPreference.matches);
   renderTopTen();
